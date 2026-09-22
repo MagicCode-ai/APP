@@ -1,0 +1,29 @@
+name: video_call
+description: 1对1 实时视频通话。底层 WebRTC，媒体经 LiveKit SFU 转发。
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.2
+  livekit_client: 2.11.0
+  flutter_webrtc: 1.6.0
+  permission_handler: ^11.4.0
+
+# Xcode 26.0.1 还没有 isiOSAppOnVision（需要 26.1+）。
+# livekit_client 允许 12.3.0，钉住以免 device_info_plus 13.x 编不过 iOS。
+dependency_overrides:
+  device_info_plus: 12.3.0
+  objective_c: 9.6.0
+
+dev_dependencies:
+  flutter_lints: ^5.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

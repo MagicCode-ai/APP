@@ -1,0 +1,14 @@
+# MagicCode Streaming (prebuilt)
+
+This directory ships a **closed-source** static library and public C headers
+so the video-call app can call MagicCode Streaming.
+
+- `include/mc_streaming.h`, `include/mcs_err.h` — public API
+- `lib/android/arm64-v8a/libmc_streaming.a`
+- `lib/ios/libmc_streaming.a`
+
+These files are **not** licensed under MIT. Do not copy, reverse engineer, or
+redistribute them except as part of building this app, unless you have a
+separate license from MagicCode.
+
+Source code for this library is not included.

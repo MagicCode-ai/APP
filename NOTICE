@@ -1,0 +1,21 @@
+# Notices
+
+The MIT License in `LICENSE` covers this repository's application source:
+Flutter/Dart client code, the LAN Token service under `server/`, and the
+local LiveKit helper scripts and config under `scripts/` and `infra/`.
+
+It does **not** cover the prebuilt native libraries or the super-resolution
+model in `third_party/`. Those files are proprietary binaries and headers.
+See:
+
+- `third_party/mc_streaming/NOTICE`
+- `third_party/magic_sr/NOTICE`
+
+A built APK or IPA that statically links those libraries is a mixed-license
+binary. You may not relicense `libmc_streaming.a`, `libmagic_sr.a`, or
+`magic_sr_gpu_params.bin` as MIT.
+
+The file `app/android/app/webrtc_patches/SimulcastVideoEncoderFactoryWrapper.kt`
+is derived from flutter_webrtc and remains under the Apache License 2.0.
+The Android build copies it over the matching file in the pub-cache so H.264
+frames can be passed through `libmc_streaming`.

@@ -1,0 +1,31 @@
+.DS_Store
+.env
+.tools/
+*.log
+*.iml
+
+# Node
+server/node_modules/
+server/dist/
+
+# Flutter
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/.packages
+app/build/
+app/.idea/
+app/android/.gradle/
+app/android/local.properties
+app/android/app/.cxx/
+app/ios/Pods/
+app/ios/.symlinks/
+app/ios/Flutter/Flutter.podspec
+app/ios/Flutter/ephemeral/
+app/ios/Flutter/Generated.xcconfig
+app/ios/Flutter/flutter_export_environment.sh
+app/ios/**/xcuserdata/
+
+# IDE
+.idea/
+.vscode/

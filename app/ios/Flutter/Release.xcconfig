@@ -1,0 +1,5 @@
+#include "Generated.xcconfig"
+GCC_PREPROCESSOR_DEFINITIONS=$(inherited) PERMISSION_CAMERA=1 PERMISSION_MICROPHONE=1
+OTHER_SWIFT_FLAGS=$(inherited) -DPERMISSION_CAMERA -DPERMISSION_MICROPHONE
+HEADER_SEARCH_PATHS=$(inherited) $(PROJECT_DIR)/../../third_party/magic_sr/interface $(PROJECT_DIR)/../../third_party/mc_streaming/include
+OTHER_LDFLAGS=$(inherited) -force_load $(PROJECT_DIR)/../../third_party/magic_sr/lib/ios/libmagic_sr.a $(PROJECT_DIR)/../../third_party/mc_streaming/lib/ios/libmc_streaming.a -lc++ -framework Metal -weak_framework MetalFX -framework CoreVideo -framework CoreMedia -framework CoreFoundation -framework QuartzCore -framework Foundation

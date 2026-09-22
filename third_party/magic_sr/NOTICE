@@ -1,0 +1,15 @@
+# MagicCode Super-Resolution (prebuilt)
+
+This directory ships a **closed-source** static library, public header, and
+GPU parameter model so the video-call app can call MagicSR.
+
+- `interface/mc_interface.h` — public API
+- `lib/android/libmagic_sr.a`
+- `lib/ios/libmagic_sr.a`
+- `model/magic_sr_gpu_params.bin`
+
+These files are **not** licensed under MIT. Do not copy, reverse engineer, or
+redistribute them except as part of building this app, unless you have a
+separate license from MagicCode.
+
+Source code for this library is not included.

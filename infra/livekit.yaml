@@ -1,0 +1,28 @@
+# LiveKit SFU 开发配置。
+# scripts/dev.sh 会把 node_ip 替换成当前电脑局域网 IP，真机才能把 ICE 候选指到这台机器。
+
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50200
+  # 局域网开发必须关掉；公网部署再改为 true
+  use_external_ip: false
+  node_ip: NODE_IP_PLACEHOLDER
+
+keys:
+  # Local demo only. Change this before exposing the server beyond your LAN.
+  devkey: local_demo_secret_replace_me_32b_
+
+logging:
+  level: info
+  pion_level: warn
+
+development: true
+room:
+  auto_create: true
+  empty_timeout: 300
+  max_participants: 2
