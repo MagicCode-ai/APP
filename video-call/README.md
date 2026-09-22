@@ -1,82 +1,82 @@
-# 1对1 实时视频通话（Flutter + LiveKit）
+# 1-to-1 real-time video calling (Flutter + LiveKit)
 
-Android / iOS / iPadOS 客户端底层走 WebRTC。两端各自和 **LiveKit SFU** 建连：
+The Android / iOS / iPadOS clients use WebRTC under the hood. Each side connects to a **LiveKit SFU**:
 
-`发送端摄像头 → 本机 Token 服务签发 JWT → LiveKit 服务器转发 RTP → 接收端`
+`sender camera → local token service issues a JWT → LiveKit forwards RTP → receiver`
 
-分辨率锁定 **1280x720**，编码上限 1.8 Mbps。可选打开发送端 `libmc_streaming` 省流，以及接收端 MagicSR 超分。
+Resolution is locked to **1280x720**, with a 1.8 Mbps encode cap. Optionally enable sender-side `libmc_streaming` to save bitrate, and receiver-side MagicSR super-resolution.
 
-本仓库默认只跑**局域网**。Token 示例地址是 `http://192.168.1.8:3000`，请改成你电脑当前的局域网 IP。
+This repo is set up for a **LAN** only. The sample token URL is `http://192.168.1.8:3000` — replace it with this computer’s current LAN IP.
 
-## 许可
+## License
 
-- 应用源码、`server/`、`scripts/`、`infra/`：**MIT**（见 `LICENSE`）
-- `third_party/mc_streaming/` 与 `third_party/magic_sr/` 里的 `.a`、公开头文件、超分模型：**专有闭源二进制，不是 MIT**（见 `NOTICE`）
+- App source, `server/`, `scripts/`, and `infra/`: **MIT** (see `LICENSE`)
+- The `.a` libraries, public headers, and super-resolution model in `third_party/mc_streaming/` and `third_party/magic_sr/`: **proprietary closed-source binaries, not MIT** (see `NOTICE`)
 
-## 目录
+## Layout
 
 ```
 video-call/
-  app/                 Flutter 客户端
-  server/              Token API（只签发 JWT）
-  infra/               局域网 LiveKit 配置
+  app/                 Flutter client
+  server/              Token API (issues JWTs only)
+  infra/               LAN LiveKit config
   scripts/             bootstrap.sh / dev.sh
-  third_party/         预编译 libmc_streaming、libmagic_sr 和超分模型
+  third_party/         Prebuilt libmc_streaming, libmagic_sr, and SR model
 ```
 
-## 本机依赖
+## Local dependencies
 
 ```bash
 chmod +x scripts/*.sh
 ./scripts/bootstrap.sh
 ```
 
-需要：
+You need:
 
-- Flutter SDK（可装到 `~/flutter` 并加入 PATH）
-- Android Studio / NDK（打 Android 包）
-- Xcode（打 iOS 包）
-- Node.js、Go、LiveKit server（`bootstrap.sh` 会准备后两项）
+- Flutter SDK (can be installed to `~/flutter` and added to `PATH`)
+- Android Studio / NDK (Android builds)
+- Xcode (iOS builds)
+- Node.js, Go, and a LiveKit server (`bootstrap.sh` prepares the last two)
 
-## 启动局域网服务器
+## Start the LAN servers
 
 ```bash
 ./scripts/dev.sh
 ```
 
-终端会打印局域网 IP，例如：
+The terminal prints the LAN IP, for example:
 
-- LiveKit：`ws://192.168.1.8:7880`
-- Token 服务：`http://192.168.1.8:3000`
+- LiveKit: `ws://192.168.1.8:7880`
+- Token service: `http://192.168.1.8:3000`
 
-两台手机必须和电脑同一 Wi‑Fi。**真机不要填 `127.0.0.1`。**
+Both phones must be on the same Wi‑Fi as the computer. **Do not use `127.0.0.1` on a real device.**
 
-`infra/livekit.yaml` 和 `.env.example` 里的密钥只用于本机演示，上线前请换成自己的随机密钥，且不要写进 App。
+The keys in `infra/livekit.yaml` and `.env.example` are local demo secrets. Replace them with your own random keys before going online, and do not bake them into the app.
 
-## 跑客户端
+## Run the client
 
 ```bash
 cd app
 export PATH="$HOME/flutter/bin:$PATH"
 flutter pub get
-flutter run --dart-define=TOKEN_URL=http://<电脑局域网IP>:3000
+flutter run --dart-define=TOKEN_URL=http://<LAN-IP>:3000
 ```
 
-加入页两端填**相同房间名、不同显示名**。第三人进同一房间会收到 409「房间已满」。
+On the join screen, both sides enter the **same room name and different display names**. A third person joining the same room gets `409` (room full).
 
-### iOS 签名
+### iOS signing
 
-开源包使用示例 Bundle ID `com.example.videocall`，`DEVELOPMENT_TEAM` 为空。请在 Xcode 里选你自己的 Team，并按系统提示信任开发者证书：
+The open-source package uses the sample bundle ID `com.example.videocall` and an empty `DEVELOPMENT_TEAM`. Pick your own Team in Xcode and trust the developer certificate when prompted:
 
-1. `open app/ios/Runner.xcworkspace`（或 `Runner.xcodeproj`）
+1. `open app/ios/Runner.xcworkspace` (or `Runner.xcodeproj`)
 2. Runner → Signing & Capabilities → Automatically manage signing
-3. Team 选个人或公司团队（不要使用仓库里的空示例值直接上架）
+3. Choose your personal or company team (do not ship the empty sample values from this repo)
 
-### 原生库
+### Native libraries
 
-- Android 通过 JNI 链接 `third_party/mc_streaming` 与 `third_party/magic_sr`
-- iOS 在 `Debug.xcconfig` / `Release.xcconfig` 里链接同样的库；`libmagic_sr.a` 需要 `-force_load`
-- Android 构建会把一份修改过的 `SimulcastVideoEncoderFactoryWrapper.kt` 拷进 `flutter_webrtc` 的 pub-cache，以便 H.264 编码结果进入 `libmc_streaming`（该文件原授权为 Apache 2.0）
+- Android links `third_party/mc_streaming` and `third_party/magic_sr` through JNI
+- iOS links the same libraries from `Debug.xcconfig` / `Release.xcconfig`; `libmagic_sr.a` needs `-force_load`
+- The Android build copies a patched `SimulcastVideoEncoderFactoryWrapper.kt` into the `flutter_webrtc` pub-cache so H.264 encode output goes through `libmc_streaming` (the original file is Apache 2.0)
 
 ## Token API
 
@@ -86,10 +86,10 @@ flutter run --dart-define=TOKEN_URL=http://<电脑局域网IP>:3000
 { "roomName": "room-1", "identity": "alice" }
 ```
 
-成功：
+Success:
 
 ```json
 { "url": "ws://192.168.1.8:7880", "token": "...", "roomName": "room-1", "identity": "alice" }
 ```
 
-房间已有 2 人且 identity 不是其中之一时返回 `409`。
+Returns `409` when the room already has 2 participants and the identity is not one of them.
