@@ -9,8 +9,15 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 
+/**
+ * Closed-loop H.264 residual transcode in front of the hardware encoder.
+ *
+ * Camera frames are converted with [VideoFrame.Buffer.toI420] and the same
+ * I420 is fed to MCS. Packed NV12/NV21 is used when the buffer is already
+ * tightly packed chroma.
+ */
 class MagicStreamingVideoEncoder(private val inner: VideoEncoder) : VideoEncoder {
-    private val pending = ConcurrentHashMap<Long, VideoFrame.I420Buffer>()
+    private val pending = ConcurrentHashMap<Long, VideoFrame.Buffer>()
     private val gate = Any()
     private var handle: Long = 0
     @Volatile private var released = false
@@ -31,6 +38,8 @@ class MagicStreamingVideoEncoder(private val inner: VideoEncoder) : VideoEncoder
             this.callback = callback
             procUs.clear()
             copyUs.clear()
+            lastCopyUs = 0
+            lastNativeUs = 0
         }
         return inner.initEncode(settings) { image, info ->
             val processed = processEncoded(image)
@@ -66,13 +75,51 @@ class MagicStreamingVideoEncoder(private val inner: VideoEncoder) : VideoEncoder
     override fun encode(frame: VideoFrame, encodeInfo: VideoEncoder.EncodeInfo?): VideoCodecStatus {
         if (!released && isEnabled()) {
             val t0 = android.os.SystemClock.elapsedRealtimeNanos()
-            val i420 = frame.buffer.toI420()
-            if (i420 != null) {
+            val src = frame.buffer
+            val stored: VideoFrame.Buffer? = if (src is PackedNv12Buffer) {
+                src.retain()
+                src
+            } else {
+                src.toI420()
+            }
+            if (stored != null) {
                 trimPending()
-                pending.put(frame.timestampNs, i420)?.release()
+                pending.put(frame.timestampNs, stored)?.release()
                 val us = ((android.os.SystemClock.elapsedRealtimeNanos() - t0) / 1000L).toInt()
+                val n: Int
+                lastCopyUs = us
                 synchronized(gate) {
                     copyUs.add(us)
+                    n = copyUs.size
+                }
+                if (n == 1 || n % 30 == 0) {
+                    android.util.Log.i(
+                        TAG,
+                        "copy n=$n us=$us meanUs=${mean(copyUs)} p95Us=${p95(copyUs)} " +
+                            "buf=${src.javaClass.simpleName} " +
+                            "${src.width}x${src.height} " +
+                            "texture=${src is VideoFrame.TextureBuffer} " +
+                            "csp=${if (stored is PackedNv12Buffer) {
+                                if (stored.nv21) "nv21" else "nv12"
+                            } else {
+                                "i420"
+                            }}",
+                    )
+                }
+                // VideoFrame() does not retain the buffer. Releasing a wrapper
+                // frame would drop pending's toI420() ref and SIGSEGV in
+                // WrappedNativeI420Buffer.release on the encoder output thread.
+                if (src is VideoFrame.TextureBuffer) {
+                    val i420 = stored as? VideoFrame.I420Buffer
+                    if (i420 != null) {
+                        i420.retain()
+                        val cpuFrame = VideoFrame(i420, frame.rotation, frame.timestampNs)
+                        try {
+                            return inner.encode(cpuFrame, encodeInfo)
+                        } finally {
+                            cpuFrame.release()
+                        }
+                    }
                 }
             }
         }
@@ -115,8 +162,8 @@ class MagicStreamingVideoEncoder(private val inner: VideoEncoder) : VideoEncoder
             if (released || !isEnabled()) {
                 return image
             }
-            val i420 = pending.remove(image.captureTimeNs)
-            if (i420 == null) {
+            val yuv = pending.remove(image.captureTimeNs)
+            if (yuv == null) {
                 return image
             }
             try {
@@ -129,30 +176,12 @@ class MagicStreamingVideoEncoder(private val inner: VideoEncoder) : VideoEncoder
                 val work = ByteBuffer.allocateDirect(cap)
                 work.put(src)
                 work.clear()
-                val y = i420.dataY
-                val u = i420.dataU
-                val v = i420.dataV
                 val outSize = intArrayOf(0)
+                val isKey = if (image.frameType == EncodedImage.FrameType.VideoFrameKey) 1 else 0
                 val t0 = android.os.SystemClock.elapsedRealtimeNanos()
-                handle = MagicStreamingNative.process(
-                    handle,
-                    y,
-                    i420.strideY,
-                    y.position(),
-                    u,
-                    i420.strideU,
-                    u.position(),
-                    v,
-                    i420.strideV,
-                    v.position(),
-                    i420.width,
-                    i420.height,
-                    if (image.frameType == EncodedImage.FrameType.VideoFrameKey) 1 else 0,
-                    work,
-                    au,
-                    outSize,
-                )
+                handle = processYuv(yuv, work, au, isKey, outSize)
                 val nativeUs = ((android.os.SystemClock.elapsedRealtimeNanos() - t0) / 1000L).toInt()
+                lastNativeUs = nativeUs
                 procUs.add(nativeUs)
                 if (procUs.size == 1 || procUs.size % 30 == 0) {
                     android.util.Log.i(
@@ -184,7 +213,69 @@ class MagicStreamingVideoEncoder(private val inner: VideoEncoder) : VideoEncoder
                 android.util.Log.e(TAG, "process failed", err)
                 return image
             } finally {
-                i420.release()
+                yuv.release()
+            }
+        }
+    }
+
+    private fun processYuv(
+        yuv: VideoFrame.Buffer,
+        work: ByteBuffer,
+        au: Int,
+        isKey: Int,
+        outSize: IntArray,
+    ): Long {
+        return when (yuv) {
+            is PackedNv12Buffer -> {
+                val y = yuv.dataY
+                val uv = yuv.dataUv
+                MagicStreamingNative.process(
+                    handle,
+                    y,
+                    yuv.strideY,
+                    y.position(),
+                    uv,
+                    yuv.strideUv,
+                    uv.position(),
+                    null,
+                    0,
+                    0,
+                    yuv.width,
+                    yuv.height,
+                    if (yuv.nv21) MagicStreamingNative.CSP_NV21 else MagicStreamingNative.CSP_NV12,
+                    isKey,
+                    work,
+                    au,
+                    outSize,
+                )
+            }
+            is VideoFrame.I420Buffer -> {
+                val y = yuv.dataY
+                val u = yuv.dataU
+                val v = yuv.dataV
+                MagicStreamingNative.process(
+                    handle,
+                    y,
+                    yuv.strideY,
+                    y.position(),
+                    u,
+                    yuv.strideU,
+                    u.position(),
+                    v,
+                    yuv.strideV,
+                    v.position(),
+                    yuv.width,
+                    yuv.height,
+                    MagicStreamingNative.CSP_I420,
+                    isKey,
+                    work,
+                    au,
+                    outSize,
+                )
+            }
+            else -> {
+                outSize[0] = 0
+                handle
             }
         }
     }
@@ -206,6 +297,14 @@ class MagicStreamingVideoEncoder(private val inner: VideoEncoder) : VideoEncoder
         private const val TAG = "MagicStreaming"
         private const val MAX_PENDING = 8
         private val enabledFlag = AtomicBoolean(false)
+
+        @JvmStatic
+        @Volatile
+        var lastCopyUs: Int = 0
+
+        @JvmStatic
+        @Volatile
+        var lastNativeUs: Int = 0
 
         @JvmStatic
         fun isEnabled(): Boolean = enabledFlag.get()

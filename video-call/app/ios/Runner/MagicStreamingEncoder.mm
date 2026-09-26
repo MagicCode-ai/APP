@@ -1,5 +1,6 @@
 #import "MagicStreamingEncoder.h"
-
+#import <CoreVideo/CoreVideo.h>
+#import <QuartzCore/QuartzCore.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import <objc/runtime.h>
 
@@ -57,8 +58,51 @@ static void CbrLog(NSString *fmt, ...) {
     NSString *line = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
     NSLog(@"%@", line);
+    static dispatch_queue_t q;
+    static NSString *path;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("vt.cbr.log", DISPATCH_QUEUE_SERIAL);
+        path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/vt_cbr.log"];
+    });
+    NSTimeInterval ts = [NSDate date].timeIntervalSince1970;
+    dispatch_async(q, ^{
+        NSString *row = [NSString stringWithFormat:@"%.3f %@\n", ts, line];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            [@"" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        [fh seekToEndOfFile];
+        [fh writeData:[row dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    });
 }
 
+static void McsFileLog(NSString *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *line = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSLog(@"%@", line);
+    static dispatch_queue_t q;
+    static NSString *path;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("mcs.file.log", DISPATCH_QUEUE_SERIAL);
+        path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/mcs.log"];
+    });
+    NSTimeInterval ts = [NSDate date].timeIntervalSince1970;
+    dispatch_async(q, ^{
+        NSString *row = [NSString stringWithFormat:@"%.3f %@\n", ts, line];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            [@"" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        [fh seekToEndOfFile];
+        [fh writeData:[row dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    });
+}
 
 static uint32_t U32Ivar(id obj, const char *name) {
     if (obj == nil) {
@@ -307,9 +351,90 @@ static void HookH264BitrateUpdate(void) {
 @property(nonatomic, strong) id<RTCVideoEncoder> inner;
 @property(nonatomic, assign) void *handle;
 @property(nonatomic, assign) BOOL released;
-@property(nonatomic, strong) NSMutableDictionary<NSNumber *, id<RTCI420Buffer>> *pending;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, id<RTCVideoFrameBuffer>> *pending;
 @property(nonatomic, strong) NSMutableArray<NSNumber *> *pendingOrder;
+@property(nonatomic, strong) NSMutableArray<NSNumber *> *toI420Us;
 @end
+
+static int fill_mcs_input(mc_streaming_input_t *in, id<RTCVideoFrameBuffer> buf,
+                          CVPixelBufferRef *locked_pb, id<RTCI420Buffer> *held_i420,
+                          int *out_csp) {
+    *locked_pb = NULL;
+    *held_i420 = nil;
+    if (out_csp) {
+        *out_csp = MCS_CSP_I420;
+    }
+    in->width = (int)buf.width;
+    in->height = (int)buf.height;
+    if ([buf isKindOfClass:[RTCCVPixelBuffer class]]) {
+        CVPixelBufferRef pb = [(RTCCVPixelBuffer *)buf pixelBuffer];
+        if (pb) {
+            OSType fmt = CVPixelBufferGetPixelFormatType(pb);
+            size_t planes = CVPixelBufferGetPlaneCount(pb);
+            int nv12 = (fmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+                        fmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            if (nv12 && planes >= 2 &&
+                CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
+                in->y = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pb, 0);
+                in->u = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+                in->v = NULL;
+                in->stride_y = (int)CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
+                in->stride_u = (int)CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+                in->stride_v = 0;
+                if (out_csp) {
+                    *out_csp = MCS_CSP_NV12;
+                }
+                if (in->y && in->u) {
+                    *locked_pb = pb;
+                    return 0;
+                }
+                CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+            }
+        }
+    }
+    id<RTCI420Buffer> i420 = [buf toI420];
+    if (!i420) {
+        return -1;
+    }
+    *held_i420 = i420;
+    in->y = i420.dataY;
+    in->u = i420.dataU;
+    in->v = i420.dataV;
+    in->stride_y = i420.strideY;
+    in->stride_u = i420.strideU;
+    in->stride_v = i420.strideV;
+    if (out_csp) {
+        *out_csp = MCS_CSP_I420;
+    }
+    return 0;
+}
+
+static int ensure_mcs_session(void **handle, int csp) {
+    mc_streaming_ctrl_params_t p;
+    if (!handle) {
+        return -1;
+    }
+    if (*handle) {
+        return 0;
+    }
+    memset(&p, 0, sizeof(p));
+    p.codec_type = MCS_H264_ZERO_DELAY_8BIT;
+    p.pic_csp = (mc_streaming_csp_e)csp;
+    p.log_level = MCS_LOG_ERROR;
+    if (mc_streaming_control(handle, MCS_CMD_SET_PARAMS, &p, NULL) != MCS_OK) {
+        McsFileLog(@"[MagicStreaming] control SET_PARAMS failed csp=%d", csp);
+        return -1;
+    }
+    {
+        mc_streaming_status_params_t st;
+        memset(&st, 0, sizeof(st));
+        mc_streaming_control(handle, MCS_CMD_GET_STATUS, NULL, &st);
+        McsFileLog(@"[MagicStreaming] control SET_PARAMS ok handle=%p ver=%s csp=%d max=%dx%d save=%.2f%%",
+                   *handle, mc_streaming_get_version(), csp, st.max_width, st.max_height,
+                   (double)st.bits_save_rate);
+    }
+    return 0;
+}
 
 @implementation MagicStreamingVideoEncoder
 
@@ -319,7 +444,7 @@ static void HookH264BitrateUpdate(void) {
 
 + (void)setEnabled:(BOOL)enabled {
     atomic_store(&gMagicStreamingEnabled, enabled);
-    NSLog(@"[MagicStreaming] enabled=%d", enabled ? 1 : 0);
+    McsFileLog(@"[MagicStreaming] enabled=%d", enabled ? 1 : 0);
 }
 
 + (BOOL)isEnabled {
@@ -367,6 +492,7 @@ static void HookH264BitrateUpdate(void) {
         _inner = encoder;
         _pending = [NSMutableDictionary dictionary];
         _pendingOrder = [NSMutableArray array];
+        _toI420Us = [NSMutableArray array];
     }
     return self;
 }
@@ -393,10 +519,10 @@ static void HookH264BitrateUpdate(void) {
     }
 }
 
-- (void)rememberI420:(id<RTCI420Buffer>)i420 timestamp:(int32_t)timestamp {
+- (void)rememberBuffer:(id<RTCVideoFrameBuffer>)buf timestamp:(int32_t)timestamp {
     NSNumber *key = @(timestamp);
     @synchronized(self) {
-        _pending[key] = i420;
+        _pending[key] = buf;
         [_pendingOrder addObject:key];
         while (_pendingOrder.count > kMagicStreamingMaxPending) {
             NSNumber *old = _pendingOrder.firstObject;
@@ -408,15 +534,15 @@ static void HookH264BitrateUpdate(void) {
     }
 }
 
-- (id<RTCI420Buffer>)takeI420:(int32_t)timestamp {
+- (id<RTCVideoFrameBuffer>)takeBuffer:(int32_t)timestamp {
     NSNumber *key = @(timestamp);
     @synchronized(self) {
-        id<RTCI420Buffer> i420 = _pending[key];
-        if (i420 != nil) {
+        id<RTCVideoFrameBuffer> buf = _pending[key];
+        if (buf != nil) {
             [_pending removeObjectForKey:key];
             [_pendingOrder removeObject:key];
         }
-        return i420;
+        return buf;
     }
 }
 
@@ -449,6 +575,7 @@ static void HookH264BitrateUpdate(void) {
     }
     NSInteger rc = [_inner releaseEncoder];
     @synchronized(self) {
+        [self logCopySummaryLocked:@"release"];
         [self clearPendingLocked];
         if (_handle) {
             mc_streaming_disable(_handle);
@@ -458,13 +585,53 @@ static void HookH264BitrateUpdate(void) {
     return rc;
 }
 
+- (void)logCopySummaryLocked:(NSString *)why {
+    NSUInteger n = _toI420Us.count;
+    if (n == 0) {
+        return;
+    }
+    long long sum = 0;
+    int maxUs = 0;
+    NSMutableArray<NSNumber *> *sorted = [_toI420Us mutableCopy];
+    for (NSNumber *v in _toI420Us) {
+        int us = v.intValue;
+        sum += us;
+        if (us > maxUs) {
+            maxUs = us;
+        }
+    }
+    [sorted sortUsingSelector:@selector(compare:)];
+    int meanUs = (int)(sum / (long long)n);
+    int p95Us = sorted[((n - 1) * 95) / 100].intValue;
+    NSString *line = [NSString stringWithFormat:
+        @"[MagicStreaming] copy summary %@ n=%lu meanUs=%d p95Us=%d maxUs=%d",
+        why, (unsigned long)n, meanUs, p95Us, maxUs];
+    NSLog(@"%@", line);
+    CbrLog(@"%@", line);
+}
+
 - (NSInteger)encode:(RTCVideoFrame *)frame
     codecSpecificInfo:(nullable id<RTCCodecSpecificInfo>)codecSpecificInfo
            frameTypes:(NSArray<NSNumber *> *)frameTypes {
     if (!_released && [MagicStreamingVideoEncoder isEnabled]) {
-        id<RTCI420Buffer> i420 = [frame.buffer toI420];
-        if (i420 != nil) {
-            [self rememberI420:i420 timestamp:frame.timeStamp];
+        CFTimeInterval t0 = CACurrentMediaTime();
+        id<RTCVideoFrameBuffer> buf = frame.buffer;
+        if (buf != nil) {
+            [self rememberBuffer:buf timestamp:frame.timeStamp];
+            int us = (int)((CACurrentMediaTime() - t0) * 1e6);
+            NSUInteger n = 0;
+            @synchronized(self) {
+                [_toI420Us addObject:@(us)];
+                n = _toI420Us.count;
+            }
+            if (n == 1 || n % 30 == 0) {
+                NSString *line = [NSString stringWithFormat:
+                    @"[MagicStreaming] copy n=%lu us=%d buf=%@ %dx%d",
+                    (unsigned long)n, us, NSStringFromClass([buf class]),
+                    (int)buf.width, (int)buf.height];
+                NSLog(@"%@", line);
+                CbrLog(@"%@", line);
+            }
         }
     }
     return [_inner encode:frame codecSpecificInfo:codecSpecificInfo frameTypes:frameTypes];
@@ -515,36 +682,55 @@ static void HookH264BitrateUpdate(void) {
         if (_released || ![MagicStreamingVideoEncoder isEnabled]) {
             return image;
         }
-        id<RTCI420Buffer> i420 = [self takeI420:image.timeStamp];
-        if (i420 == nil || image.buffer.length == 0) {
+        id<RTCVideoFrameBuffer> yuv = [self takeBuffer:image.timeStamp];
+        if (yuv == nil || image.buffer.length == 0) {
             return image;
         }
         NSData *inData = image.buffer;
         size_t au = inData.length;
         size_t cap = au * 2 + 4096;
         NSMutableData *work = [NSMutableData dataWithLength:cap];
-        memcpy(work.mutableBytes, inData.bytes, au);
 
         mc_streaming_input_t in = {0};
-        in.struct_size = sizeof(in);
-        in.width = i420.width;
-        in.height = i420.height;
-        in.y = i420.dataY;
-        in.u = i420.dataU;
-        in.v = i420.dataV;
-        in.stride_y = i420.strideY;
-        in.stride_u = i420.strideU;
-        in.stride_v = i420.strideV;
         in.frame_type = (image.frameType == RTCFrameTypeVideoFrameKey) ? 1 : 0;
+        in.bs = (const uint8_t *)inData.bytes;
+        in.au_size = au;
+        CVPixelBufferRef locked_pb = NULL;
+        id<RTCI420Buffer> held_i420 = nil;
+        int pic_csp = MCS_CSP_I420;
+        if (fill_mcs_input(&in, yuv, &locked_pb, &held_i420, &pic_csp) != 0) {
+            return image;
+        }
 
         mc_streaming_output_t out = {0};
         out.bs = (uint8_t *)work.mutableBytes;
         out.bs_size = cap;
 
-        int rc = mc_streaming_enable(&_handle, MCS_H264_ZERO_DELAY_8BIT, &in, &out);
+        if (ensure_mcs_session(&_handle, pic_csp) != 0) {
+            if (locked_pb) {
+                CVPixelBufferUnlockBaseAddress(locked_pb, kCVPixelBufferLock_ReadOnly);
+            }
+            return image;
+        }
+        int rc = mc_streaming_enable(&_handle, &in, &out);
+        if (locked_pb) {
+            CVPixelBufferUnlockBaseAddress(locked_pb, kCVPixelBufferLock_ReadOnly);
+        }
+        (void)held_i420;
         if (rc != MCS_OK) {
-            NSLog(@"[MagicStreaming] enable rc=%d out=%zu key=%d %dx%d", rc, out.bs_size,
-                  (int)in.frame_type, in.width, in.height);
+            McsFileLog(@"[MagicStreaming] enable rc=%d out=%zu key=%d %dx%d csp=%d", rc, out.bs_size,
+                       (int)in.frame_type, in.width, in.height, pic_csp);
+        } else {
+            static int first_ok;
+            if (!first_ok) {
+                mc_streaming_status_params_t st;
+                memset(&st, 0, sizeof(st));
+                mc_streaming_control(&_handle, MCS_CMD_GET_STATUS, NULL, &st);
+                McsFileLog(@"[MagicStreaming] enable first ok out=%zu key=%d %dx%d max=%dx%d save=%.2f%%",
+                           out.bs_size, (int)in.frame_type, in.width, in.height, st.max_width,
+                           st.max_height, (double)st.bits_save_rate);
+                first_ok = 1;
+            }
         }
         if (out.bs_size == 0 || out.bs_size > cap) {
             return image;

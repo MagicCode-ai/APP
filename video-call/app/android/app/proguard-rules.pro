@@ -8,3 +8,4 @@
     public static boolean isEnabled();
     public static void setEnabled(boolean);
 }
+-keep class com.videocall.video_call.PackedNv12Buffer { *; }

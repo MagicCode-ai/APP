@@ -1,10 +1,10 @@
-Client code. See the parent [README.md](../README.md) for the full setup.
+客户端代码。完整说明见上一级 [README.md](../README.md)。
 
 ```bash
-# Start the LAN token service / LiveKit from the repo root first
+# 先在仓库根目录启动局域网 Token / LiveKit
 ../scripts/dev.sh
 
-# In another terminal, run the app. Replace TOKEN_URL with this computer's LAN IP.
+# 另开终端跑 App，TOKEN_URL 换成电脑局域网 IP
 export PATH="$HOME/flutter/bin:$PATH"
-flutter run --dart-define=TOKEN_URL=http://<LAN-IP>:3000
+flutter run --dart-define=TOKEN_URL=http://<电脑局域网IP>:3000
 ```

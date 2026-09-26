@@ -7,12 +7,15 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'magic_streaming.dart';
 
-/// 1280x720 @ 30fps，编码上限 1.8 Mbps。关闭自适应/多层码流。
-const VideoParameters kVideo1280x720 = VideoParameters(
+/// 发送 1280x720 @ 15fps @ 1.8 Mbps。摄像头按 1280x720 打开。
+const int kSendMaxBitrate = 1800 * 1000;
+const int kSendMaxFramerate = 15;
+const int kSendLongEdge = 1280;
+const VideoParameters kVideoCapture720p15 = VideoParameters(
   dimensions: VideoDimensions(1280, 720),
   encoding: VideoEncoding(
-    maxBitrate: 1800 * 1000,
-    maxFramerate: 30,
+    maxBitrate: kSendMaxBitrate,
+    maxFramerate: kSendMaxFramerate,
   ),
 );
 
@@ -22,13 +25,13 @@ RoomOptions buildRoomOptions() {
     dynacast: false,
     defaultCameraCaptureOptions: const CameraCaptureOptions(
       cameraPosition: CameraPosition.front,
-      maxFrameRate: 30,
-      params: kVideo1280x720,
+      maxFrameRate: 15,
+      params: kVideoCapture720p15,
     ),
     defaultVideoPublishOptions: VideoPublishOptions(
       simulcast: false,
       videoCodec: 'h264',
-      videoEncoding: kVideo1280x720.encoding,
+      videoEncoding: kVideoCapture720p15.encoding,
       backupVideoCodec: const BackupVideoCodec(
         enabled: false,
         simulcast: false,
@@ -128,7 +131,7 @@ class CallSession extends ChangeNotifier {
   String get localResolutionLabel {
     final dims = _localDimensions;
     if (dims == null) {
-      return '采集目标 720x960';
+      return '采集目标 1280x720';
     }
     return '本地 ${dims.width}x${dims.height}';
   }
@@ -278,6 +281,7 @@ class CallSession extends ChangeNotifier {
           await room.localParticipant?.setCameraEnabled(false);
         } else {
           await room.localParticipant?.setCameraEnabled(true);
+          await _lockSend720p();
         }
       } catch (err) {
         debugPrint('开启摄像头失败（模拟器常见）: $err');
@@ -312,6 +316,9 @@ class CallSession extends ChangeNotifier {
     }
     cameraEnabled = !cameraEnabled;
     await participant.setCameraEnabled(cameraEnabled);
+    if (cameraEnabled) {
+      await _lockSend720p();
+    }
     notifyListeners();
   }
 
@@ -330,10 +337,52 @@ class CallSession extends ChangeNotifier {
             ? CameraPosition.back
             : CameraPosition.front,
       );
+      await _lockSend720p();
     } catch (err) {
       debugPrint('切换摄像头失败: $err');
     }
     notifyListeners();
+  }
+
+  /// Capture and send 1280x720 @ 15fps @ 1.8 Mbps.
+  Future<void> _lockSend720p() async {
+    for (var i = 0; i < 8; i++) {
+      final track = localVideoTrack;
+      if (track is! LocalVideoTrack) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        continue;
+      }
+      final sender = track.sender;
+      if (sender == null) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        continue;
+      }
+      final encodings = sender.parameters.encodings;
+      if (encodings == null || encodings.isEmpty) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        continue;
+      }
+      final settings = track.mediaStreamTrack.getSettings();
+      final width = (settings['width'] as num?)?.toInt() ?? 1280;
+      final height = (settings['height'] as num?)?.toInt() ?? 720;
+      final longEdge = width > height ? width : height;
+      final scale = longEdge <= kSendLongEdge ? 1.0 : longEdge / kSendLongEdge;
+      for (final encoding in encodings) {
+        encoding.scaleResolutionDownBy = scale;
+        encoding.maxFramerate = kSendMaxFramerate;
+        encoding.maxBitrate = kSendMaxBitrate;
+      }
+      try {
+        await sender.setParameters(sender.parameters);
+        debugPrint(
+          'send lock 720p scale=$scale capture=${width}x$height '
+          'fps=$kSendMaxFramerate bitrate=$kSendMaxBitrate',
+        );
+      } catch (err) {
+        debugPrint('send lock 720p failed: $err');
+      }
+      return;
+    }
   }
 
   Future<void> disconnect() async {

@@ -126,7 +126,7 @@ void clear_textures() {
 void release_locked() {
     if (g_sr_handle) {
         make_current();
-        MC_Disable(g_sr_handle);
+        mc_nscaler_disable(g_sr_handle);
         g_sr_handle = nullptr;
     }
     if (g_display != EGL_NO_DISPLAY && make_current()) {
@@ -140,12 +140,16 @@ void release_locked() {
     g_logged_first = false;
 }
 
-void fill_gles_resource(magic_resource_t *res, GLuint tex) {
-    memset(res, 0, sizeof(*res));
-    res->handle.gl_texture = tex;
-    res->format = (uint32_t)GL_RGBA8;
-    res->target = (uint32_t)GL_TEXTURE_2D;
-    res->mip_count = 1;
+void fill_nscaler_tex(magic_data_e *handle, uint32_t *format, uint32_t *target,
+                     uint32_t *mip_count, unsigned int *w, unsigned int *h,
+                     GLuint tex, int width, int height) {
+    memset(handle, 0, sizeof(*handle));
+    handle->gl_texture = tex;
+    *format = (uint32_t)GL_RGBA8;
+    *target = (uint32_t)GL_TEXTURE_2D;
+    *mip_count = 1;
+    *w = (unsigned int)width;
+    *h = (unsigned int)height;
 }
 
 bool ensure_textures(int in_w, int in_h, int out_w, int out_h) {
@@ -257,17 +261,14 @@ int init_session(int width, int height, const char *model_path) {
         return -5;
     }
     LOGI("init model=%s bytes=%lld %dx%d version=%s",
-         model_path, (long long)st_file.st_size, width, height, MC_GetVersion());
+         model_path, (long long)st_file.st_size, width, height, mc_nscaler_version());
     if (!create_gles_context()) {
         LOGE("egl context failed");
         return -2;
     }
-    input_param_t param;
+    ctrl_param_t param;
     memset(&param, 0, sizeof(param));
-    param.struct_size = (uint32_t)sizeof(param);
     param.input_type = INPUT_TEXTURE_RGB8Unorm;
-    param.width = (unsigned int)width;
-    param.height = (unsigned int)height;
     param.scaler_factor = 1.5f;
     param.alg_mode = SPATIAL_BALANCED_MODE;
     param.log_level = MAGIC_LOG_INFO;
@@ -279,27 +280,26 @@ int init_session(int width, int height, const char *model_path) {
     output_status_params_t st;
     memset(&st, 0, sizeof(st));
     g_sr_handle = nullptr;
-    int rc = MC_Enable(&g_sr_handle, nullptr, &param, &st);
+    int rc = mc_nscaler_control(&g_sr_handle, MC_NSCALER_CMD_SET_PARAM, &param, &st);
     if (rc != 0 || !g_sr_handle) {
-        LOGE("MC_Enable init rc=%d model=%s", rc, model_path);
+        LOGE("mc_nscaler_control SET_PARAM rc=%d model=%s", rc, model_path);
         release_locked();
         return rc != 0 ? rc : -3;
     }
-    g_scale = st.scaler_factor;
+    g_scale = st.scaler_factor > 0.f ? st.scaler_factor : 1.5f;
     g_session_w = width;
     g_session_h = height;
-    const uint32_t expect_w = scaled_dimension((uint32_t)width, 1.5f);
-    const uint32_t expect_h = scaled_dimension((uint32_t)height, 1.5f);
-    if (st.width != (unsigned)width || st.height != (unsigned)height ||
-        st.output_width != expect_w || st.output_height != expect_h) {
-        LOGE("size mismatch session=%ux%u->%ux%u expect=%dx%d->%ux%u",
-             st.width, st.height, st.output_width, st.output_height,
-             width, height, (unsigned)expect_w, (unsigned)expect_h);
-        release_locked();
-        return -4;
+    const uint32_t expect_w = scaled_dimension((uint32_t)width, g_scale);
+    const uint32_t expect_h = scaled_dimension((uint32_t)height, g_scale);
+    unsigned int out_w = st.output_width > 0 ? st.output_width : expect_w;
+    unsigned int out_h = st.output_height > 0 ? st.output_height : expect_h;
+    if (st.width != 0 && st.height != 0 &&
+        ((int)st.width != width || (int)st.height != height)) {
+        out_w = expect_w;
+        out_h = expect_h;
     }
-    LOGI("MC_Init ok %s mode=SPATIAL_BALANCED scale=1.5 sharpen=1 %dx%d -> %ux%u",
-         MC_GetVersion(), width, height, st.output_width, st.output_height);
+    LOGI("nscaler init ok %s mode=SPATIAL_BALANCED scale=1.5 sharpen=1 %dx%d -> %ux%u",
+         mc_nscaler_version(), width, height, out_w, out_h);
     return 0;
 }
 
@@ -307,7 +307,7 @@ int init_session(int width, int height, const char *model_path) {
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_videocall_video_1call_MagicSrNative_version(JNIEnv *env, jclass) {
-    const char *v = MC_GetVersion();
+    const char *v = mc_nscaler_version();
     return env->NewStringUTF(v ? v : "");
 }
 
@@ -367,18 +367,22 @@ Java_com_videocall_video_1call_MagicSrNative_processI420(
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, rotated.data());
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    magic_frame_t frame;
-    memset(&frame, 0, sizeof(frame));
-    fill_gles_resource(&frame.image_in, g_input_tex);
-    fill_gles_resource(&frame.image_out, g_output_tex);
-    int ret = MC_Enable(&g_sr_handle, &frame, nullptr, nullptr);
+    mc_nscaler_input_frame_t inFrame;
+    mc_nscaler_output_frame_t outFrame;
+    memset(&inFrame, 0, sizeof(inFrame));
+    memset(&outFrame, 0, sizeof(outFrame));
+    fill_nscaler_tex(&inFrame.handle, &inFrame.format, &inFrame.target, &inFrame.mip_count,
+                     &inFrame.width, &inFrame.height, g_input_tex, rw, rh);
+    fill_nscaler_tex(&outFrame.handle, &outFrame.format, &outFrame.target, &outFrame.mip_count,
+                     &outFrame.width, &outFrame.height, g_output_tex, out_w, out_h);
+    int ret = mc_nscaler_enable(&g_sr_handle, &inFrame, &outFrame);
     if (ret != 0) {
-        LOGE("MC_Enable process ret=%d", ret);
+        LOGE("mc_nscaler_enable process ret=%d", ret);
         return ret;
     }
     if (!g_logged_first) {
         g_logged_first = true;
-        LOGI("MC_Enable first ok in=%dx%d out=%dx%d", rw, rh, out_w, out_h);
+        LOGI("mc_nscaler_enable first ok in=%dx%d out=%dx%d", rw, rh, out_w, out_h);
     }
     glFinish();
 

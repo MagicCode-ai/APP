@@ -146,7 +146,7 @@
 
 - (void)teardownEngine {
     if (self.srHandle) {
-        MC_Disable(self.srHandle);
+        mc_nscaler_disable(self.srHandle);
         self.srHandle = NULL;
     }
     self.inputTexture = nil;
@@ -223,26 +223,32 @@
                            withBytes:rotated.bytes
                          bytesPerRow:(NSUInteger)rw * 4];
 
-    magic_frame_t mf;
-    memset(&mf, 0, sizeof(mf));
-    mf.image_in.handle.pointer = (__bridge void *)self.inputTexture;
-    mf.image_in.format = (uint32_t)MTLPixelFormatRGBA8Unorm;
-    mf.image_in.mip_count = 1;
-    mf.image_out.handle.pointer = (__bridge void *)self.outputTexture;
-    mf.image_out.format = (uint32_t)MTLPixelFormatRGBA8Unorm;
-    mf.image_out.mip_count = 1;
+    mc_nscaler_input_frame_t inFrame;
+    mc_nscaler_output_frame_t outFrame;
+    memset(&inFrame, 0, sizeof(inFrame));
+    memset(&outFrame, 0, sizeof(outFrame));
+    inFrame.handle.pointer = (__bridge void *)self.inputTexture;
+    inFrame.format = (uint32_t)MTLPixelFormatRGBA8Unorm;
+    inFrame.mip_count = 1;
+    inFrame.width = (unsigned int)rw;
+    inFrame.height = (unsigned int)rh;
+    outFrame.handle.pointer = (__bridge void *)self.outputTexture;
+    outFrame.format = (uint32_t)MTLPixelFormatRGBA8Unorm;
+    outFrame.mip_count = 1;
+    outFrame.width = (unsigned int)self.outW;
+    outFrame.height = (unsigned int)self.outH;
 
     void *handle = self.srHandle;
-    int ret = MC_Enable(&handle, &mf, NULL, NULL);
+    int ret = mc_nscaler_enable(&handle, &inFrame, &outFrame);
     self.srHandle = handle;
     if (ret != 0) {
-        [self logFail:[NSString stringWithFormat:@"MC_Enable process ret=%d", ret]];
+        [self logFail:[NSString stringWithFormat:@"mc_nscaler_enable process ret=%d", ret]];
         return;
     }
     if (!self.loggedFirst) {
         self.loggedFirst = YES;
         NSLog(@"[MagicSr] first process ok version=%s in=%dx%d out=%dx%d",
-              MC_GetVersion(), rw, rh, self.outW, self.outH);
+              mc_nscaler_version(), rw, rh, self.outW, self.outH);
     }
 
     NSMutableData *outRgba = [NSMutableData dataWithLength:(NSUInteger)self.outW * self.outH * 4];
@@ -284,6 +290,7 @@
                                                           height:height
                                                        mipmapped:NO];
     inDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    inDesc.storageMode = MTLStorageModeShared;
     self.inputTexture = [self.device newTextureWithDescriptor:inDesc];
 
     const int outW = (int)llround((double)width * 1.5);
@@ -294,6 +301,7 @@
                                                           height:outH
                                                        mipmapped:NO];
     outDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    outDesc.storageMode = MTLStorageModeShared;
     self.outputTexture = [self.device newTextureWithDescriptor:outDesc];
     if (!self.inputTexture || !self.outputTexture) {
         if (error) {
@@ -302,12 +310,9 @@
         return NO;
     }
 
-    input_param_t param;
+    ctrl_param_t param;
     memset(&param, 0, sizeof(param));
-    param.struct_size = (uint32_t)sizeof(param);
     param.input_type = INPUT_TEXTURE_RGB8Unorm;
-    param.width = (unsigned int)width;
-    param.height = (unsigned int)height;
     param.scaler_factor = 1.5f;
     param.alg_mode = SPATIAL_BALANCED_MODE;
     param.log_level = MAGIC_LOG_INFO;
@@ -319,11 +324,11 @@
     output_status_params_t st;
     memset(&st, 0, sizeof(st));
     void *handle = NULL;
-    int rc = MC_Enable(&handle, NULL, &param, &st);
+    int rc = mc_nscaler_control(&handle, MC_NSCALER_CMD_SET_PARAM, &param, &st);
     self.srHandle = handle;
     if (rc != 0 || !self.srHandle) {
         if (error) {
-            NSString *msg = [NSString stringWithFormat:@"MC_Enable init rc=%d model=%@", rc, modelPath];
+            NSString *msg = [NSString stringWithFormat:@"mc_nscaler_control SET_PARAM rc=%d model=%@", rc, modelPath];
             *error = [NSError errorWithDomain:@"MagicSr" code:rc userInfo:@{NSLocalizedDescriptionKey: msg}];
         }
         [self teardownEngine];
@@ -331,8 +336,13 @@
     }
     self.sessionW = width;
     self.sessionH = height;
-    self.outW = (int)st.output_width;
-    self.outH = (int)st.output_height;
+    self.outW = (int)st.output_width > 0 ? (int)st.output_width : outW;
+    self.outH = (int)st.output_height > 0 ? (int)st.output_height : outH;
+    /* SET_PARAM create defaults to 640x360 until first enable supplies size. */
+    if (st.width != 0 && st.height != 0 && ((int)st.width != width || (int)st.height != height)) {
+        self.outW = outW;
+        self.outH = outH;
+    }
     if (self.outW != outW || self.outH != outH) {
         MTLTextureDescriptor *resized =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -340,10 +350,11 @@
                                                               height:self.outH
                                                            mipmapped:NO];
         resized.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        resized.storageMode = MTLStorageModeShared;
         self.outputTexture = [self.device newTextureWithDescriptor:resized];
     }
-    NSLog(@"[MagicSr] MC_Init ok version=%s mode=SPATIAL_BALANCED scale=1.5 sharpen=1 %dx%d -> %dx%d model=%@",
-          MC_GetVersion(), width, height, self.outW, self.outH, modelPath);
+    NSLog(@"[MagicSr] nscaler init ok version=%s mode=SPATIAL_BALANCED scale=1.5 sharpen=1 %dx%d -> %dx%d model=%@",
+          mc_nscaler_version(), width, height, self.outW, self.outH, modelPath);
     return YES;
 }
 

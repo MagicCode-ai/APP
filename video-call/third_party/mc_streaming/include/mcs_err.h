@@ -5,11 +5,12 @@
 extern "C" {
 #endif
 
-/* Return codes for mc_streaming_enable / mc_streaming_disable and internal
- * encode paths. 0 is success. The encoder may also return a positive
- * changed-MB count on success. Negative values are errors. A negative
- * code from mc_streaming_enable can still mean a legal Annex-B AU was
- * written if output->bs_size > 0 (bypass copy). */
+/* Return codes for mc_streaming_enable / mc_streaming_disable /
+ * mc_streaming_control and internal encode paths. 0 is success. The
+ * encoder may also return a positive changed-MB count on success.
+ * Negative values are errors. A negative code from mc_streaming_enable
+ * can still mean a legal Annex-B AU was written if output->bs_size > 0
+ * (bypass copy). */
 enum {
     MCS_OK          = 0,   /* success */
     MCS_ERR_INVAL   = -1,  /* bad arguments; nothing emitted */
@@ -18,7 +19,7 @@ enum {
     MCS_ERR_ENCODE  = -4,  /* closed-loop encode failed */
     MCS_ERR_REWRITE = -5,  /* slice rewrite / entropy re-encode failed */
     MCS_ERR_OUTPUT  = -6,  /* output buffer too small or emit failed */
-    MCS_ERR_SIZE    = -7,  /* resolution, refs, B-frames, or coded size change not allowed */
+    MCS_ERR_SIZE    = -7,  /* width/height above 32*1024, or size/refs/B change not allowed */
     MCS_ERR_KEY     = -8,  /* caller key/delta does not match whether the AU is I/IDR */
     MCS_ERR_CROP    = -9,  /* YUV width/height does not match coded or display size */
     MCS_ERR_BYPASS  = -10  /* still copying input NALs until the next I or IDR */
